@@ -1,6 +1,7 @@
 defmodule ExGram.Updates.WebhookTest do
   use ExUnit.Case, async: false
 
+  alias ExGram.Error
   alias ExGram.Model.Update
   alias ExGram.Updates.Webhook
 
@@ -230,6 +231,28 @@ defmodule ExGram.Updates.WebhookTest do
     end
   end
 
+  # --- set_webhook failures ---
+
+  describe "set_webhook failures" do
+    test "logs a warning and keeps the process alive" do
+      Application.put_env(:ex_gram, :webhook, url: "https://bot.example.com")
+
+      ExGram.Test.stub_error(
+        :set_webhook,
+        %Error{code: 500, message: "Internal Server Error"}
+      )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          webhook_pid = start_webhook_with_opts(%{})
+          assert Process.alive?(webhook_pid)
+        end)
+
+      assert log =~ "Failed to set Telegram webhook"
+      assert log =~ "Internal Server Error"
+    end
+  end
+
   # --- update/2 dispatch ---
 
   describe "update/2" do
@@ -254,10 +277,13 @@ defmodule ExGram.Updates.WebhookTest do
 
       {:ok, receiver_pid} = NotifyingReceiver.start_link(test_pid)
 
-      start_supervised!(%{
-        id: {Webhook, @token},
-        start: {Webhook, :start_link, [%{bot: receiver_pid, token: @token}]}
-      })
+      webhook_pid =
+        start_supervised!(%{
+          id: {Webhook, @token},
+          start: {Webhook, :start_link, [%{bot: receiver_pid, token: @token}]}
+        })
+
+      :sys.get_state(webhook_pid)
 
       update = %Update{update_id: 42}
       Webhook.update(update, @token_hash)
@@ -273,10 +299,15 @@ defmodule ExGram.Updates.WebhookTest do
 
     opts = Map.merge(%{bot: receiver_pid, token: @token}, extra_opts)
 
-    start_supervised!(%{
-      id: {Webhook, System.unique_integer([:positive])},
-      start: {Webhook, :start_link, [opts]}
-    })
+    webhook_pid =
+      start_supervised!(%{
+        id: {Webhook, System.unique_integer([:positive])},
+        start: {Webhook, :start_link, [opts]}
+      })
+
+    # Wait for the deferred webhook registration to finish.
+    :sys.get_state(webhook_pid)
+    webhook_pid
   end
 
   defmodule UpdateReceiver do

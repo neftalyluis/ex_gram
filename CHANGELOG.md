@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Defer webhook registration until after `ExGram.Updates.Webhook` starts. A
+  failure to reach the Telegram API is now logged instead of crashing the
+  process.
 
 ## [0.71.0]
 - Upload files placed inside an `InputRichMessage` (`sendRichMessage`, `sendRichMessageDraft`,

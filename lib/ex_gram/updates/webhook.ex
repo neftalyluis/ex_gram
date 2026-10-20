@@ -2,9 +2,10 @@ defmodule ExGram.Updates.Webhook do
   @moduledoc """
   Updates implementation using the webhook method.
 
-  This GenServer receives updates pushed from Telegram via webhooks. On startup,
+  This GenServer receives updates pushed from Telegram via webhooks. After startup,
   it automatically calls `ExGram.set_webhook/2` to register the webhook URL with
-  Telegram.
+  Telegram. Registration is deferred so an unreachable Telegram API does not block
+  or crash the process.
 
   The webhook URL is constructed as `<base_url>/<path>/<token_hash>`, where
   `token_hash` is a Base64-encoded SHA hash of the bot token.
@@ -47,11 +48,21 @@ defmodule ExGram.Updates.Webhook do
     Process.flag(:trap_exit, true)
     start_time = ExGram.Telemetry.start([:updates, :init], %{bot: bot, method: :webhook})
 
-    set_webhook(token, opts)
-    state = %{bot: bot}
+    {:ok, %{bot: bot}, {:continue, {:set_webhook, token, opts, start_time}}}
+  end
+
+  def handle_continue({:set_webhook, token, opts, start_time}, %{bot: bot} = state) do
+    case set_webhook(token, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to set Telegram webhook: #{inspect(reason)}")
+    end
 
     ExGram.Telemetry.stop([:updates, :init], start_time, %{bot: bot, method: :webhook})
-    {:ok, state}
+
+    {:noreply, state}
   end
 
   def terminate(_reason, %{bot: bot}) do
@@ -102,12 +113,18 @@ defmodule ExGram.Updates.Webhook do
         base_path = config[:path] || "/telegram"
         path = Path.join([webhook_uri.path || "/", base_path, token_hash(token)])
         url = URI.to_string(%{webhook_uri | path: path})
-        {:ok, true} = ExGram.set_webhook(url, params)
+
+        case ExGram.set_webhook(url, params) do
+          {:ok, true} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
 
       {:error, error} ->
         Logger.error(
           "The webhook_url is wrong with reason: #{inspect(error)}. Please manually set the webhook using this method: https://core.telegram.org/bots/api#setwebhook or edit the config file!"
         )
+
+        :ok
     end
   end
 
