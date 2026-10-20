@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Fix `ExGram.Adapter.Req` raising `ArgumentError` when a named Finch pool was
+  configured, by not setting `:connect_options` at the same time as `:finch`.
+  The adapter now also reads `config :ex_gram, :adapter_opts` as global defaults.
 
 ## [0.71.0]
 - Upload files placed inside an `InputRichMessage` (`sendRichMessage`, `sendRichMessageDraft`,

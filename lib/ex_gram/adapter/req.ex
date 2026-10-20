@@ -6,6 +6,10 @@ if Code.ensure_loaded?(Req) do
     This is the recommended HTTP adapter. It uses Finch under the hood for connection
     pooling and provides sensible defaults for long polling.
 
+    Global options can be configured with `config :ex_gram, :adapter_opts`. Per-call
+    options override the global options. Pass `:finch` to use a named Finch pool.
+    When a named pool is used, `:connect_options` is not forwarded to Req.
+
     See `ExGram.Adapter` behaviour for more details.
     """
     @behaviour ExGram.Adapter
@@ -37,16 +41,34 @@ if Code.ensure_loaded?(Req) do
       |> handle_result()
     end
 
-    defp put_finch_options(req, opts) do
-      connect_options = [timeout: Keyword.get(opts, :connect_timeout, 30_000)]
+    @doc false
+    def put_finch_options(req, opts) do
+      opts =
+        :ex_gram
+        |> ExGram.Config.get(:adapter_opts, [])
+        |> Keyword.merge(opts)
+
+      finch = Keyword.get(opts, :finch)
 
       finch_options = [
-        connect_options: connect_options,
         pool_timeout: Keyword.get(opts, :pool_timeout, 5_000),
         # High timeout, we use long polling
         receive_timeout: Keyword.get(opts, :receive_timeout, 60_000),
-        finch: Keyword.get(opts, :finch)
+        finch: finch
       ]
+
+      finch_options =
+        if is_nil(finch) do
+          connect_options =
+            Keyword.merge(
+              [timeout: Keyword.get(opts, :connect_timeout, 30_000)],
+              Keyword.get(opts, :connect_options, [])
+            )
+
+          Keyword.put(finch_options, :connect_options, connect_options)
+        else
+          finch_options
+        end
 
       req
       |> Req.Request.register_options([:connect_options, :pool_timeout, :receive_timeout, :finch])
