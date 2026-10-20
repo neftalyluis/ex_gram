@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Back off exponentially when `getUpdates` returns a `409 Conflict`. This avoids
+  log spam and tight polling loops while another bot instance is shutting down.
 
 ## [0.71.0]
 - Upload files placed inside an `InputRichMessage` (`sendRichMessage`, `sendRichMessageDraft`,

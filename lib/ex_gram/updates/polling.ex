@@ -8,6 +8,9 @@ defmodule ExGram.Updates.Polling do
   Automatically deletes any existing webhook on startup (configurable with
   `:delete_webhook` option).
 
+  When Telegram returns a `409 Conflict` because another instance is polling,
+  the worker backs off exponentially instead of retrying every 100ms.
+
   Configured with `config :ex_gram, updates: ExGram.Updates.Polling, polling: [...]`.
 
   See the [Polling and Webhooks guide](polling-and-webhooks.md) for more details.
@@ -18,6 +21,8 @@ defmodule ExGram.Updates.Polling do
   require Logger
 
   @polling_timeout 100
+  @conflict_backoff 500
+  @max_conflict_backoff 30_000
 
   def start_link(%{bot: bot, token: token} = opts) do
     opts = Map.drop(opts, [:bot, :token])
@@ -36,10 +41,10 @@ defmodule ExGram.Updates.Polling do
 
     Process.send_after(self(), {:fetch, :update_id}, @polling_timeout)
     ExGram.Telemetry.stop([:updates, :init], start_time, %{bot: bot, method: :polling})
-    {:ok, {bot, token, -1, opts}}
+    {:ok, {bot, token, -1, opts, 0}}
   end
 
-  def terminate(_reason, {bot, _token, _uid, _opts}) do
+  def terminate(_reason, {bot, _token, _uid, _opts, _conflicts}) do
     ExGram.Telemetry.emit([:updates, :shutdown], %{bot: bot, method: :polling})
   end
 
@@ -47,19 +52,33 @@ defmodule ExGram.Updates.Polling do
 
   def handle_info(:timeout, state), do: handle_info({:fetch, :update_id}, state)
 
-  def handle_info({:fetch, :update_id}, {bot, token, uid, opts}) do
+  def handle_info({:fetch, :update_id}, {bot, token, uid, opts, conflicts}) do
     start_meta = %{bot: bot}
     start_time = ExGram.Telemetry.start(:polling, start_meta)
 
     try do
-      updates = get_updates(token, uid, opts)
-      send_updates(updates, bot)
+      case get_updates(token, uid, opts) do
+        {:ok, updates} ->
+          send_updates(updates, bot)
 
-      nid = next_pid(uid, updates)
+          nid = next_pid(uid, updates)
 
-      ExGram.Telemetry.stop(:polling, start_time, %{bot: bot, updates_count: length(updates)})
+          ExGram.Telemetry.stop(:polling, start_time, %{bot: bot, updates_count: length(updates)})
 
-      {:noreply, {bot, token, nid, opts}, @polling_timeout}
+          {:noreply, {bot, token, nid, opts, 0}, @polling_timeout}
+
+        {:error, :conflict} ->
+          backoff = conflict_backoff(conflicts)
+          Logger.warning("[ExGram] Conflict fetching updates, retrying in #{backoff}ms")
+          ExGram.Telemetry.stop(:polling, start_time, %{bot: bot, updates_count: 0})
+
+          {:noreply, {bot, token, uid, opts, conflicts + 1}, backoff}
+
+        {:error, _error} ->
+          ExGram.Telemetry.stop(:polling, start_time, %{bot: bot, updates_count: 0})
+
+          {:noreply, {bot, token, uid, opts, 0}, @polling_timeout}
+      end
     rescue
       e ->
         ExGram.Telemetry.exception(:polling, start_time, :error, e, __STACKTRACE__, start_meta)
@@ -88,13 +107,25 @@ defmodule ExGram.Updates.Polling do
       |> Keyword.put(:token, token)
 
     try do
-      ExGram.get_updates!(opts)
+      {:ok, ExGram.get_updates!(opts)}
     rescue
       e in ExGram.Error ->
-        formatted_error = Exception.format(:error, e, __STACKTRACE__)
-        Logger.error("[ExGram] Error fetching updates: #{formatted_error}")
-        []
+        if conflict_error?(e) do
+          {:error, :conflict}
+        else
+          formatted_error = Exception.format(:error, e, __STACKTRACE__)
+          Logger.error("[ExGram] Error fetching updates: #{formatted_error}")
+          {:error, e}
+        end
     end
+  end
+
+  defp conflict_error?(%ExGram.Error{code: 409}), do: true
+  defp conflict_error?(%ExGram.Error{message: "Conflict" <> _}), do: true
+  defp conflict_error?(_error), do: false
+
+  defp conflict_backoff(conflicts) do
+    min(@conflict_backoff * Integer.pow(2, min(conflicts, 6)), @max_conflict_backoff)
   end
 
   defp send_updates(updates, bot) do
